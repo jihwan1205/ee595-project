@@ -1,23 +1,36 @@
 # EE595 Project: Image Generation with Diffusion and Flow Models
 
-This repository implements three generative models for image generation:
-- **DDPM** (Denoising Diffusion Probabilistic Model): A diffusion-based model that learns to denoise images
-- **FlowMatching**: A flow-based model using Conditional Flow Matching (CFM) that learns velocity fields
-- **MeanFlow**: A mean flow model with adaptive weighted loss
+## 📌 Overview
+This project investigates few-step generative modeling on the **CelebA 64×64** dataset using a unified 50M-parameter U-Net architecture.  
+We implement and compare three generative frameworks:
 
-All models use a U-Net backbone architecture and are trained on CelebA datasets (64x64, 128x128, or 256x256 resolution). The project includes training scripts, FID evaluation, and sampling utilities.
+- **DDPM** (Denoising Diffusion Probabilistic Model): a classical diffusion model trained to progressively denoise images.  
+- **FlowMatching**: a flow-based model using Conditional Flow Matching (CFM) to learn continuous velocity fields.  
+- **MeanFlow**: a mean-flow model trained with an adaptive weighted loss to enable efficient few-step sampling.
 
-## Environment Setup on slurm compute node
+To further improve low-NFE performance, we additionally explore **Rectified Flow**, applying it both to FlowMatching-pretrained models and MeanFlow-pretrained models for comparison.
 
-```shell
+Finally, we implement a two-stage pipeline that uses FlowMatching to generate synthetic (noise → image) transport pairs, which are then used to train a MeanFlow model.  
+This produces a high-quality, few-step generative model capable of sampling images with as few as **1–4 NFEs**.
+
+### Environment Setup
+
+```bash
+# Clone the repository
 git clone git@github.com:jihwan1205/ee595-project.git
 cd ee595-project
+
+# Create Conda environment in /tmp (recommended for SLURM clusters)
 conda create --prefix /tmp/$USER/.conda/envs/ee595-env python=3.10 -y
-conda activate ee595-env
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+conda activate /tmp/$USER/.conda/envs/ee595-env
+
+# Install PyTorch (CUDA 12.4)
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 \
+    --index-url https://download.pytorch.org/whl/cu124
+
+# Install remaining dependencies
 pip install -r requirements.txt
 ```
-
 
 ## Stage 1 — Flow Matching Pre-training
 We begin by training a 50M-parameter U-Net using standard **flow matching**:
@@ -55,7 +68,7 @@ sbatch scripts/samples/generate_reflow_samples.sh
 
 ---
 
-## ⚡ Stage 3 — MeanFlow Training
+## Stage 3 — MeanFlow Training
 The MeanFlow model is trained on the generated pairs to learn a **straightened, near-optimal transport map**:
 
 - Inputs: `(x1, x0)`  
