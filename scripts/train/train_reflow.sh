@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=meanflow_reflow_train
+#SBATCH --job-name=reflow
 #SBATCH --output=logs/train_%j.out
 #SBATCH --error=logs/train_%j.err
 #SBATCH --gres=gpu:a6000:4
@@ -23,10 +23,10 @@ BATCH_SIZE=64
 MODEL_TYPE="MeanFlow"
 WANDB_PROJECT="image_generation"
 WANDB_ENTITY="few-step-video-generation"
-WANDB_EXP_NAME="meanflow_reflow_fm_${TIMESTAMP}"
-REFLOW_DATASET_PATH="./data/fm_reflow"
-# WANDB_EXP_NAME="meanflow_reflow_meanflow_${TIMESTAMP}"
-# REFLOW_DATASET_PATH="./data/meanflow_reflow"
+# WANDB_EXP_NAME="meanflow_reflow_fm_${TIMESTAMP}"
+# REFLOW_DATASET_PATH="./data/fm_reflow"
+WANDB_EXP_NAME="meanflow_reflow_meanflow_${TIMESTAMP}"
+REFLOW_DATASET_PATH="./data/meanflow_reflow"
 SAVE_DIR="runs/${WANDB_EXP_NAME}"
 LR=1e-4
 NUM_TRAIN_TIMESTEPS=1000
@@ -69,6 +69,7 @@ cmd="torchrun --standalone --nproc_per_node=gpu train.py \
     --wandb_project $WANDB_PROJECT \
     --wandb_entity $WANDB_ENTITY \
     --wandb_exp_name $WANDB_EXP_NAME \
+    --use_wandb \
     --use_lr_scheduler \
     --warmup_steps 2000 \
     --min_lr_ratio 0.05 \
