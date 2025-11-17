@@ -25,6 +25,117 @@ from src.sg_ratio_scheduler import SGRatioScheduler
 from src.ema import EMA
 from measure_fid import prepare_reference_images
 
+
+def load_dataset(args):
+    # Load dataset
+    print("Loading dataset...")
+    
+    if args.use_reflow:
+        try:
+            reflow_dataset = ReflowDataset(root=args.reflow_dataset_path)
+            train_sampler, val_sampler = None, None
+            if args.use_ddp:
+                train_sampler = DistributedSampler(reflow_dataset, shuffle=True)
+                val_sampler = DistributedSampler(reflow_dataset)
+            
+            train_dataloader = DataLoader(
+                reflow_dataset,
+                batch_size=args.batch_size,
+                shuffle=(train_sampler is None),
+                sampler=train_sampler,
+                num_workers=4,
+                drop_last=True
+            )
+            val_dataloader = DataLoader(
+                reflow_dataset,
+                batch_size=args.batch_size,
+                shuffle=False,
+                sampler=val_sampler,
+                num_workers=4,
+                drop_last=False
+            )
+            
+            train_iterator = get_data_iterator(train_dataloader)
+            valid_iterator = get_data_iterator(val_dataloader)
+        except Exception as e:
+            print(f"Error loading Reflow dataset: {e}")
+            return None, None
+        return train_iterator, valid_iterator
+    
+    if args.use_ddp:
+        world_size = dist.get_world_size()
+        assert args.batch_size % world_size == 0, "Batch size must be divisible by number of GPUs"
+        args.batch_size = args.batch_size // world_size  # Adjust batch size per GPU
+        args.fid_batch_size = args.fid_batch_size // world_size  # Adjust FID batch size per GPU
+        
+        def train_dataloader_ddp(self):
+            return DataLoader(
+                self.train_ds, 
+                batch_size=self.batch_size, 
+                num_workers=self.num_workers,
+                sampler=DistributedSampler(self.train_ds, shuffle=True),
+                drop_last=True,
+            )
+
+        def val_dataloader_ddp(self):
+            return DataLoader(
+                self.val_ds,
+                batch_size=self.batch_size,
+                num_workers=self.num_workers,
+                shuffle=False,
+                sampler=DistributedSampler(self.val_ds),
+                drop_last=False,
+            )
+
+        try:
+            data_module = create_data_module(
+                dataset_name=args.dataset,
+                root=args.data_root,
+                batch_size=args.batch_size,
+                num_workers=4,
+                val_split=args.val_split,
+                seed=args.seed
+            )
+            
+            data_module.train_dataloader_ddp = types.MethodType(train_dataloader_ddp, data_module)
+            data_module.val_dataloader_ddp = types.MethodType(val_dataloader_ddp, data_module)
+
+            train_loader = data_module.train_dataloader_ddp()
+            train_iterator = get_data_iterator(train_loader)
+            valid_loader = data_module.val_dataloader_ddp()
+            valid_iterator = get_data_iterator(valid_loader)
+            
+            print(f"Total iterations: {args.num_iterations}")
+            print(f"Dataset resolution: {data_module.image_resolution}x{data_module.image_resolution}")
+            # Store image resolution in args for use in trainer
+            args.image_resolution = data_module.image_resolution
+        except Exception as e:
+            print(f"Error loading dataset: {e}")
+            return
+    else:
+        try:
+            data_module = create_data_module(
+                dataset_name=args.dataset,
+                root=args.data_root,
+                batch_size=args.batch_size,
+                num_workers=4,
+                val_split=args.val_split,
+                seed=args.seed
+            )
+            
+            train_loader = data_module.train_dataloader()
+            train_iterator = get_data_iterator(train_loader)
+            valid_loader = data_module.val_dataloader()
+            valid_iterator = get_data_iterator(valid_loader)
+            
+            print(f"Total iterations: {args.num_iterations}")
+            print(f"Dataset resolution: {data_module.image_resolution}x{data_module.image_resolution}")
+            # Store image resolution in args for use in trainer
+            args.image_resolution = data_module.image_resolution
+        except Exception as e:
+            print(f"Error loading dataset: {e}")
+            return
+    
 def main(args):
     # Set default paths based on dataset
     if args.data_root is None:
@@ -119,81 +230,7 @@ def main(args):
     }
     
     # Load dataset
-    print(f"Loading dataset: {args.dataset}...")
-    
-    if args.use_ddp:
-        world_size = dist.get_world_size()
-        assert args.batch_size % world_size == 0, "Batch size must be divisible by number of GPUs"
-        args.batch_size = args.batch_size // world_size  # Adjust batch size per GPU
-        args.fid_batch_size = args.fid_batch_size // world_size  # Adjust FID batch size per GPU
-        
-        def train_dataloader_ddp(self):
-            return DataLoader(
-                self.train_ds, 
-                batch_size=self.batch_size, 
-                num_workers=self.num_workers,
-                sampler=DistributedSampler(self.train_ds, shuffle=True),
-                drop_last=True,
-            )
-
-        def val_dataloader_ddp(self):
-            return DataLoader(
-                self.val_ds,
-                batch_size=self.batch_size,
-                num_workers=self.num_workers,
-                shuffle=False,
-                sampler=DistributedSampler(self.val_ds),
-                drop_last=False,
-            )
-
-        try:
-            data_module = create_data_module(
-                dataset_name=args.dataset,
-                root=args.data_root,
-                batch_size=args.batch_size,
-                num_workers=4,
-                val_split=args.val_split,
-                seed=args.seed
-            )
-            
-            data_module.train_dataloader_ddp = types.MethodType(train_dataloader_ddp, data_module)
-            data_module.val_dataloader_ddp = types.MethodType(val_dataloader_ddp, data_module)
-
-            train_loader = data_module.train_dataloader_ddp()
-            train_iterator = get_data_iterator(train_loader)
-            valid_loader = data_module.val_dataloader_ddp()
-            valid_iterator = get_data_iterator(valid_loader)
-            
-            print(f"Total iterations: {args.num_iterations}")
-            print(f"Dataset resolution: {data_module.image_resolution}x{data_module.image_resolution}")
-            # Store image resolution in args for use in trainer
-            args.image_resolution = data_module.image_resolution
-        except Exception as e:
-            print(f"Error loading dataset: {e}")
-            return
-    else:
-        try:
-            data_module = create_data_module(
-                dataset_name=args.dataset,
-                root=args.data_root,
-                batch_size=args.batch_size,
-                num_workers=4,
-                val_split=args.val_split,
-                seed=args.seed
-            )
-            
-            train_loader = data_module.train_dataloader()
-            train_iterator = get_data_iterator(train_loader)
-            valid_loader = data_module.val_dataloader()
-            valid_iterator = get_data_iterator(valid_loader)
-            
-            print(f"Total iterations: {args.num_iterations}")
-            print(f"Dataset resolution: {data_module.image_resolution}x{data_module.image_resolution}")
-            # Store image resolution in args for use in trainer
-            args.image_resolution = data_module.image_resolution
-        except Exception as e:
-            print(f"Error loading dataset: {e}")
-            return
+    train_iterator, valid_iterator = load_dataset(args)
     
     # Create optimizer with model-specific settings
     if args.model_type in ('MeanFlow'):
@@ -335,6 +372,10 @@ def parse_args():
     parser.add_argument("--meanflow_sg_ratio", type=float, default=0.0, help="sg_ratio = 1: full backprop; sg_ratio = 0: full stop-gradient")
     parser.add_argument("--meanflow_use_sg_scheduler", action="store_true", help="Use stop-gradient ratio scheduler for MeanFlow")
     parser.add_argument("--meanflow_sg_ratio_warmup_iters", type=int, default=7000, help="Number of iterations to warmup stop-gradient ratio from 0.0 to 1.0 for MeanFlow")
+    
+    # Reflow arguments
+    parser.add_argument("--use_reflow", action="store_true", help="Use Reflow dataset and training procedure")
+    parser.add_argument("--reflow_dataset_path", type=str, default="data/fm_reflow", help="Path to the Reflow dataset")
 
     args = parser.parse_args()
     return args

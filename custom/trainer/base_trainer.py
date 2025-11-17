@@ -156,9 +156,25 @@ class BaseTrainer:
 
     @torch.no_grad()
     def _eval_step(self, data: torch.Tensor) -> float:
-        noise = torch.randn_like(data)
+        # noise = torch.randn_like(data)
+        noise, data = self._get_noise_and_data(data)
         loss = self.module.compute_loss(data, noise)
         return loss
+
+    def _move_to_device(self, data, device):
+        """Move data to device, handling both tensor and dictionary formats."""
+        if isinstance(data, dict):
+            return {k: v.to(device) for k, v in data.items()}
+        else:
+            return data.to(device)
+    
+    def _get_noise_and_data(self, data: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.args.use_reflow:
+            noise = data['x0']
+            data = data['x1']
+        else:
+            noise = torch.randn_like(data)
+        return noise, data
     
     @torch.no_grad()
     def _evaluate_loss(self) -> float:
@@ -174,7 +190,7 @@ class BaseTrainer:
         for b_idx, data in enumerate(pbar):
             if max_batches is not None and b_idx >= max_batches: break
             
-            data = data.to(self.rank)
+            data = self._move_to_device(data, self.rank)
             loss = self._eval_step(data)
             total += loss
             count += 1
@@ -223,7 +239,8 @@ class BaseTrainer:
         gc.collect()
 
     def _train_step(self, data: torch.Tensor) -> torch.Tensor:
-        noise = torch.randn_like(data)
+        # noise = torch.randn_like(data)
+        noise, data = self._get_noise_and_data(data)
         
         loss = self.module.compute_loss(data, noise)
 
@@ -272,7 +289,7 @@ class BaseTrainer:
             self.iteration = iteration # Store current iteration as class attribute
             self.model.iteration = iteration
             data = next(self.train_iterator)
-            data = data.to(self.rank)
+            data = self._move_to_device(data, self.rank)
             loss = self._train_step(data)
             
             loss = loss.item()  
