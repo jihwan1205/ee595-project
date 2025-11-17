@@ -11,6 +11,7 @@ import wandb
 import argparse
 from cleanfid import fid
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 import gc
 
@@ -29,6 +30,7 @@ class BaseTrainer:
         lr_scheduler: torch.optim.lr_scheduler._LRScheduler = None,
         sg_ratio_scheduler: SGRatioScheduler = None,
         ema = None,
+        train_sampler = None,
     ):
         self.args = args
         self.rank = dist.get_rank() if self.args.use_ddp else self.args.device
@@ -41,6 +43,7 @@ class BaseTrainer:
         self.ema = ema
         self.sg_ratio_scheduler = sg_ratio_scheduler
         self.model_config = model_config
+        self.train_sampler = train_sampler
         
         self.args.save_dir.mkdir(exist_ok=True, parents=True)
     
@@ -156,9 +159,25 @@ class BaseTrainer:
 
     @torch.no_grad()
     def _eval_step(self, data: torch.Tensor) -> float:
-        noise = torch.randn_like(data)
+        # noise = torch.randn_like(data)
+        noise, data = self._get_noise_and_data(data)
         loss = self.module.compute_loss(data, noise)
         return loss
+
+    def _move_to_device(self, data, device):
+        """Move data to device, handling both tensor and dictionary formats."""
+        if isinstance(data, dict):
+            return {k: v.to(device) for k, v in data.items()}
+        else:
+            return data.to(device)
+    
+    def _get_noise_and_data(self, data: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.args.use_reflow:
+            noise = data['x0']
+            data = data['x1']
+        else:
+            noise = torch.randn_like(data)
+        return noise, data
     
     @torch.no_grad()
     def _evaluate_loss(self) -> float:
@@ -174,7 +193,7 @@ class BaseTrainer:
         for b_idx, data in enumerate(pbar):
             if max_batches is not None and b_idx >= max_batches: break
             
-            data = data.to(self.rank)
+            data = self._move_to_device(data, self.rank)
             loss = self._eval_step(data)
             total += loss
             count += 1
@@ -223,7 +242,8 @@ class BaseTrainer:
         gc.collect()
 
     def _train_step(self, data: torch.Tensor) -> torch.Tensor:
-        noise = torch.randn_like(data)
+        # noise = torch.randn_like(data)
+        noise, data = self._get_noise_and_data(data)
         
         loss = self.module.compute_loss(data, noise)
 
@@ -271,8 +291,17 @@ class BaseTrainer:
         for iteration in pbar:
             self.iteration = iteration # Store current iteration as class attribute
             self.model.iteration = iteration
+            
+            # Update DistributedSampler epoch periodically to ensure proper data shuffling
+            if self.train_sampler is not None and isinstance(self.train_sampler, DistributedSampler):
+                # Calculate epoch based on iteration (assuming dataset size / batch_size iterations per epoch)
+                # Update epoch every 1000 iterations to ensure proper shuffling
+                if iteration % 1000 == 1:
+                    epoch = (iteration - 1) // 1000
+                    self.train_sampler.set_epoch(epoch)
+            
             data = next(self.train_iterator)
-            data = data.to(self.rank)
+            data = self._move_to_device(data, self.rank)
             loss = self._train_step(data)
             
             loss = loss.item()  

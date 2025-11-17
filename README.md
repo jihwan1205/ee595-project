@@ -18,55 +18,54 @@ pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https
 pip install -r requirements.txt
 ```
 
-## Running Training Scripts
 
-The project includes SLURM batch scripts for training each model on compute nodes. All scripts are located in `scripts/train/`.
+## Stage 1 — Flow Matching Pre-training
+We begin by training a 50M-parameter U-Net using standard **flow matching**:
 
-### Training DDPM
+- Forward process: linear interpolation  
+- Target velocity: `v = x0 - x1`  
+- Timesteps sampled from LogNormal distribution  
+- Optimizer: AdamW  
+- Dataset: CelebA 64×64  
+- Goal: learn a strong flow field capable of sampling with 32–40 NFEs
 
-```shell
-sbatch scripts/train/sbatch_ddpm.sh
-```
-
-This script trains a DDPM model with:
-- 1M iterations
-- Batch size: 32
-- Learning rate: 1e-4
-- Logs saved to `logs/train_ddpm_<timestamp>.log`
-- Checkpoints saved to `runs/ddpm_<timestamp>/`
-
-### Training FlowMatching
+After training, the FM model produces clean images with moderately long ODE trajectories.
 
 ```shell
 sbatch scripts/train/sbatch_fm.sh
 ```
 
-This script trains a FlowMatching model with:
-- 1M iterations
-- Batch size: 32
-- Learning rate: 1e-4
-- Uses DDP (Distributed Data Parallel) with `torchrun`
-- Logs saved to `logs/train_fm_<timestamp>.log`
-- Checkpoints saved to `runs/fm_<timestamp>/`
+---
 
-### Training MeanFlow
+
+## Stage 2 — Synthetic Pair Generation
+Using the pretrained FM model, we generate **100,000 (noise, image)** endpoint pairs:
+
+- Noise sampled from `N(0, I)`
+- Samples generated with **NFE = 32**
+- Saved pairs:  
+  - `x1`: initial noise  
+  - `x0`: FM-generated image  
+
+These pairs approximate optimal transport endpoints and serve as training data for MeanFlow.
+```shell
+sbatch scripts/samples/generate_reflow_samples.sh
+```
+
+
+---
+
+## ⚡ Stage 3 — MeanFlow Training
+The MeanFlow model is trained on the generated pairs to learn a **straightened, near-optimal transport map**:
+
+- Inputs: `(x1, x0)`  
+- Objective: MeanFlow velocity estimation  
+- Effect: straightens the FM flow, improving few-step sampling  
+- Result: a highly efficient sampler that performs well even at **1–4 NFEs**
 
 ```shell
 sbatch scripts/train/sbatch_meanflow.sh
 ```
 
-This script trains a MeanFlow model with:
-- 1M iterations
-- Batch size: 16
-- Learning rate: 1e-4
-- Uses DDP (Distributed Data Parallel) with `torchrun`
-- Logs saved to `logs/train_meanflow_<timestamp>.log`
-- Checkpoints saved to `runs/meanflow_<timestamp>/`
-
-### Notes
-
-- All scripts require a SLURM cluster with GPU access (A6000 GPU specified)
-- Scripts automatically create log directories and timestamped experiment folders
-- Training progress is logged to both files and WandB (if configured)
-- FID evaluation is performed during training at specified intervals
+---
 
