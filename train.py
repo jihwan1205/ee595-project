@@ -35,6 +35,10 @@ def load_dataset(args):
             reflow_dataset = ReflowDataset(root=args.reflow_dataset_path)
             train_sampler, val_sampler = None, None
             if args.use_ddp:
+                world_size = dist.get_world_size()
+                assert args.batch_size % world_size == 0, "Batch size must be divisible by number of GPUs"
+                args.batch_size = args.batch_size // world_size  # Adjust batch size per GPU
+                args.fid_batch_size = args.fid_batch_size // world_size  # Adjust FID batch size per GPU
                 train_sampler = DistributedSampler(reflow_dataset, shuffle=True)
                 val_sampler = DistributedSampler(reflow_dataset)
             
@@ -60,7 +64,7 @@ def load_dataset(args):
         except Exception as e:
             print(f"Error loading Reflow dataset: {e}")
             return None, None
-        return train_iterator, valid_iterator
+        return train_iterator, valid_iterator, train_sampler
     
     if args.use_ddp:
         world_size = dist.get_world_size()
@@ -101,6 +105,7 @@ def load_dataset(args):
             data_module.val_dataloader_ddp = types.MethodType(val_dataloader_ddp, data_module)
 
             train_loader = data_module.train_dataloader_ddp()
+            train_sampler = train_loader.sampler if hasattr(train_loader, 'sampler') and isinstance(train_loader.sampler, DistributedSampler) else None
             train_iterator = get_data_iterator(train_loader)
             valid_loader = data_module.val_dataloader_ddp()
             valid_iterator = get_data_iterator(valid_loader)
@@ -111,7 +116,7 @@ def load_dataset(args):
             args.image_resolution = data_module.image_resolution
         except Exception as e:
             print(f"Error loading dataset: {e}")
-            return
+            return None, None, None
     else:
         try:
             data_module = create_data_module(
@@ -124,6 +129,7 @@ def load_dataset(args):
             )
             
             train_loader = data_module.train_dataloader()
+            train_sampler = train_loader.sampler if hasattr(train_loader, 'sampler') and isinstance(train_loader.sampler, DistributedSampler) else None
             train_iterator = get_data_iterator(train_loader)
             valid_loader = data_module.val_dataloader()
             valid_iterator = get_data_iterator(valid_loader)
@@ -134,9 +140,15 @@ def load_dataset(args):
             args.image_resolution = data_module.image_resolution
         except Exception as e:
             print(f"Error loading dataset: {e}")
-            return
+            return None, None, None
+    
+    return train_iterator, valid_iterator, train_sampler
     
 def main(args):
+    # setup DDP
+    if args.use_ddp:
+        ddp_setup()
+        
     # Set default paths based on dataset
     if args.data_root is None:
         if args.dataset.lower() in ['celebahq256', 'celebahq', 'celebahq-256']:
@@ -165,10 +177,7 @@ def main(args):
             num_samples=None,
             dataset_name=args.dataset
         )
-    # setup DDP
-    if args.use_ddp:
-        ddp_setup()
-    
+
     # Set seed for reproducibility
     seed_everything(args.seed)
     print(f"Seed set to: {args.seed}")
@@ -230,7 +239,11 @@ def main(args):
     }
     
     # Load dataset
-    train_iterator, valid_iterator = load_dataset(args)
+    result = load_dataset(args)
+    if result is None or result[0] is None:
+        print("Failed to load dataset")
+        return
+    train_iterator, valid_iterator, train_sampler = result
     
     # Create optimizer with model-specific settings
     if args.model_type in ('MeanFlow'):
@@ -299,6 +312,7 @@ def main(args):
         sg_ratio_scheduler=sg_ratio_scheduler,
         ema=ema,
         model_config=model_config,
+        train_sampler=train_sampler,
     )
     
     trainer.train()

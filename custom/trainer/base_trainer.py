@@ -11,6 +11,7 @@ import wandb
 import argparse
 from cleanfid import fid
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 import torch.distributed as dist
 import gc
 
@@ -29,6 +30,7 @@ class BaseTrainer:
         lr_scheduler: torch.optim.lr_scheduler._LRScheduler = None,
         sg_ratio_scheduler: SGRatioScheduler = None,
         ema = None,
+        train_sampler = None,
     ):
         self.args = args
         self.rank = dist.get_rank() if self.args.use_ddp else self.args.device
@@ -41,6 +43,7 @@ class BaseTrainer:
         self.ema = ema
         self.sg_ratio_scheduler = sg_ratio_scheduler
         self.model_config = model_config
+        self.train_sampler = train_sampler
         
         self.args.save_dir.mkdir(exist_ok=True, parents=True)
     
@@ -288,6 +291,15 @@ class BaseTrainer:
         for iteration in pbar:
             self.iteration = iteration # Store current iteration as class attribute
             self.model.iteration = iteration
+            
+            # Update DistributedSampler epoch periodically to ensure proper data shuffling
+            if self.train_sampler is not None and isinstance(self.train_sampler, DistributedSampler):
+                # Calculate epoch based on iteration (assuming dataset size / batch_size iterations per epoch)
+                # Update epoch every 1000 iterations to ensure proper shuffling
+                if iteration % 1000 == 1:
+                    epoch = (iteration - 1) // 1000
+                    self.train_sampler.set_epoch(epoch)
+            
             data = next(self.train_iterator)
             data = self._move_to_device(data, self.rank)
             loss = self._train_step(data)

@@ -69,7 +69,6 @@ cmd="torchrun --standalone --nproc_per_node=gpu train.py \
     --wandb_project $WANDB_PROJECT \
     --wandb_entity $WANDB_ENTITY \
     --wandb_exp_name $WANDB_EXP_NAME \
-    --use_wandb \
     --use_lr_scheduler \
     --warmup_steps 2000 \
     --min_lr_ratio 0.05 \
@@ -79,6 +78,7 @@ cmd="torchrun --standalone --nproc_per_node=gpu train.py \
     --fid_nfe_list 1 2 4 \
     --use_reflow \
     --reflow_dataset_path $REFLOW_DATASET_PATH \
+    --skip_initial_evaluation \
     --fid_batch_size 512"
     
 

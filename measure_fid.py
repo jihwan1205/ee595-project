@@ -12,7 +12,7 @@ from tqdm import tqdm
 
 from cleanfid import fid
 from dataset import create_data_module
-from src.utils import tensor_to_pil_image
+from src.utils import tensor_to_pil_image, print
 
 
 def prepare_reference_images(data_root, reference_dir, num_samples=None, dataset_name="celeba64"):
