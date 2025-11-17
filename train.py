@@ -20,6 +20,7 @@ from dataset import create_data_module, get_data_iterator
 from src.utils import get_current_time, seed_everything, ddp_setup, print, is_main
 from custom.trainer.base_trainer import BaseTrainer
 from custom_model import create_custom_model
+from custom.dataset.reflow_dataset import ReflowDataset
 from src.sg_ratio_scheduler import SGRatioScheduler
 from src.ema import EMA
 from measure_fid import prepare_reference_images
