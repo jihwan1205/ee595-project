@@ -76,11 +76,22 @@ class EMA:
     def state_dict(self):
         """Return EMA state dict for saving."""
         return {
-            'state_dict': self.shadow,
+            'decay': self.decay,
+            'shadow': self.shadow,
         }
     
     def load_state_dict(self, state_dict):
-        """Load EMA state dict."""
-        self.decay = state_dict['decay']
-        self.shadow = state_dict['shadow']
+        """Load EMA state dict.
+        
+        Handles both old format ({'state_dict': shadow}) and new format ({'decay': ..., 'shadow': ...}).
+        """
+        # Handle old format where state_dict was saved as {'state_dict': shadow}
+        if 'state_dict' in state_dict and 'shadow' not in state_dict:
+            self.shadow = state_dict['state_dict']
+        else:
+            self.shadow = state_dict['shadow']
+        
+        # Update decay if present in state_dict
+        if 'decay' in state_dict:
+            self.decay = state_dict['decay']
 

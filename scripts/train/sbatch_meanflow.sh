@@ -2,13 +2,11 @@
 #SBATCH --job-name=meanflow_train
 #SBATCH --output=logs/train_%j.out
 #SBATCH --error=logs/train_%j.err
-#SBATCH --gres=gpu:a6000:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --gres=gpu:a6000:4
 #SBATCH -w node5
 
 # MeanFlow Training Script
-# Trains MeanFlow model with 1M iterations and batch size 16
+# Trains MeanFlow model with 1M iterations and batch size 16 using DDP
 # All stdout and stderr are logged to a file
 
 set -euo pipefail
@@ -17,13 +15,14 @@ set -euo pipefail
 mkdir -p logs
 source ~/.bashrc
 conda activate /tmp/$USER/.conda/envs/ee595
+
 # Get current timestamp for log file
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOG_FILE="logs/train_meanflow_${TIMESTAMP}.log"
 
 # Training configuration
 NUM_ITERATIONS=1_000_000
-BATCH_SIZE=16
+BATCH_SIZE=32
 MODEL_TYPE="MeanFlow"
 WANDB_PROJECT="image_generation"
 WANDB_ENTITY="few-step-video-generation"

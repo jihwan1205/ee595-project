@@ -66,7 +66,8 @@ def tensor_to_pil_image(tensor: torch.Tensor):
     return images
 
 
-def save_model(model, checkpoint_path: str, model_config: Dict[str, Any], config_path: str = None):
+def save_model(model, checkpoint_path: str, model_config: Dict[str, Any], config_path: str = None,
+               optimizer=None, lr_scheduler=None, iteration=None, ema_state_dict=None):
     """
     Save model checkpoint and configuration JSON file together.
     
@@ -75,12 +76,28 @@ def save_model(model, checkpoint_path: str, model_config: Dict[str, Any], config
         checkpoint_path: Path to save the checkpoint (.pt file)
         model_config: Dictionary containing model configuration
         config_path: Path to save the config JSON file (default: same directory as checkpoint)
+        optimizer: Optional optimizer state to save
+        lr_scheduler: Optional learning rate scheduler state to save
+        iteration: Optional iteration number to save
+        ema_state_dict: Optional EMA state dict to save
     """
     checkpoint_path = Path(checkpoint_path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Save model state dict
-    torch.save({"state_dict": model.state_dict()}, checkpoint_path)
+    # Build checkpoint dictionary
+    checkpoint = {"state_dict": model.state_dict()}
+    
+    if optimizer is not None:
+        checkpoint["optimizer"] = optimizer.state_dict()
+    if lr_scheduler is not None:
+        checkpoint["lr_scheduler"] = lr_scheduler.state_dict()
+    if iteration is not None:
+        checkpoint["iteration"] = iteration
+    if ema_state_dict is not None:
+        checkpoint["ema"] = ema_state_dict
+    
+    # Save checkpoint
+    torch.save(checkpoint, checkpoint_path)
     
     # Save model config JSON
     if config_path is None:
@@ -104,6 +121,37 @@ def save_ema(ema_state_dict, checkpoint_path: str):
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     
     torch.save(ema_state_dict, checkpoint_path)
+
+def save_ema_full_checkpoint(model, ema_state_dict, optimizer=None, lr_scheduler=None, 
+                            iteration=None, checkpoint_path: str = None):
+    """
+    Save EMA checkpoint with full training state for resuming.
+    
+    Args:
+        model: The model to save
+        ema_state_dict: EMA state dict to save
+        optimizer: Optional optimizer state to save
+        lr_scheduler: Optional learning rate scheduler state to save
+        iteration: Optional iteration number to save
+        checkpoint_path: Path to save the EMA checkpoint (.pt file)
+    """
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Build checkpoint dictionary with all training state
+    checkpoint = {
+        'state_dict': model.state_dict(),
+        'ema': ema_state_dict,
+    }
+    
+    if optimizer is not None:
+        checkpoint['optimizer'] = optimizer.state_dict()
+    if lr_scheduler is not None:
+        checkpoint['lr_scheduler'] = lr_scheduler.state_dict()
+    if iteration is not None:
+        checkpoint['iteration'] = iteration
+    
+    torch.save(checkpoint, checkpoint_path)
 
 
 def load_model(checkpoint_path: str, create_model_fn, device: str = "cpu", config_path: str = None):

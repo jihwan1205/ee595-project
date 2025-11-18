@@ -2,9 +2,7 @@
 #SBATCH --job-name=fm_train
 #SBATCH --output=logs/train_%j.out
 #SBATCH --error=logs/train_%j.err
-#SBATCH --gres=gpu:a6000:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=32G
+#SBATCH --gres=gpu:a6000:4
 #SBATCH -w node5
 
 # DDPM Training Script

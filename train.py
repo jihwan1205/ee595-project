@@ -302,6 +302,51 @@ def main(args):
         print("Not using Stop-Gradient Ratio Scheduler")
     
     
+    # Load checkpoint if resuming (expects EMA checkpoint with full training state)
+    resume_iteration = None
+    
+    if args.resume_ema_ckpt:
+        print(f"Resuming training from EMA checkpoint: {args.resume_ema_ckpt}")
+        ckpt = torch.load(args.resume_ema_ckpt, map_location='cpu')
+        
+        # Load model state
+        if 'state_dict' in ckpt:
+            model.load_state_dict(ckpt['state_dict'])
+            print("  ✓ Model state loaded")
+        else:
+            raise ValueError("Checkpoint must contain 'state_dict' for model")
+        
+        # Load optimizer state if available
+        if 'optimizer' in ckpt:
+            optimizer.load_state_dict(ckpt['optimizer'])
+            print("  ✓ Optimizer state loaded")
+        
+        # Load lr_scheduler state if available
+        if 'lr_scheduler' in ckpt and lr_scheduler is not None:
+            try:
+                lr_scheduler.load_state_dict(ckpt['lr_scheduler'])
+                print("  ✓ LR scheduler state loaded")
+            except Exception as e:
+                print(f"  ⚠ Warning: Could not load LR scheduler state: {e}")
+        
+        # Load EMA state (required for EMA checkpoints)
+        if 'ema' in ckpt:
+            if ema is None:
+                print("Warning: EMA checkpoint specified but EMA is not enabled. Creating EMA with default decay.")
+                ema = EMA(model, decay=args.ema_decay, device=dist.get_rank() if args.use_ddp else device)
+            ema.load_state_dict(ckpt['ema'])
+            print("  ✓ EMA state loaded")
+        else:
+            raise ValueError("EMA checkpoint must contain 'ema' state dict")
+        
+        # Get iteration number if available
+        if 'iteration' in ckpt:
+            resume_iteration = ckpt['iteration']
+            print(f"  ✓ Resuming from iteration {resume_iteration}")
+        
+        print("EMA checkpoint loaded successfully.")
+    
+    
     trainer = BaseTrainer(
         args=args,
         model=model,
@@ -314,6 +359,10 @@ def main(args):
         model_config=model_config,
         train_sampler=train_sampler,
     )
+    
+    # Set resume iteration if available
+    if resume_iteration is not None:
+        trainer.iteration = resume_iteration
     
     trainer.train()
     dist.destroy_process_group()
@@ -337,6 +386,7 @@ def parse_args():
     parser.add_argument("--sample_interval", type=int, default=2000, help="Interval for generating samples during training")
     parser.add_argument("--sample_nfe_list", type=int, nargs='+', default=[1, 2, 4], help="Number of steps for sampling during training")
     parser.add_argument("--sample_batch_size", type=int, default=16, help="Batch size for sampling during training")
+    parser.add_argument("--resume_ema_ckpt", type=str, default=None, help="Path to EMA checkpoint to resume training from (must contain full training state: model, optimizer, lr_scheduler, iteration, EMA)")
     
     # Validation arguments
     parser.add_argument("--val_interval", type=int, default=1000, help="Interval for validation")

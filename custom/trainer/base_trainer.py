@@ -16,7 +16,7 @@ import torch.distributed as dist
 import gc
 
 from src.sg_ratio_scheduler import SGRatioScheduler
-from src.utils import save_model, tensor_to_pil_image, compute_gen_image_statistics, compute_image_folder_statistics, is_main, print, save_ema
+from src.utils import save_model, tensor_to_pil_image, compute_gen_image_statistics, compute_image_folder_statistics, is_main, print, save_ema_full_checkpoint
 
 
 class BaseTrainer:
@@ -91,12 +91,32 @@ class BaseTrainer:
 
     def _save_model(self, ckpt_name: str):
         checkpoint_path = self.args.save_dir / ckpt_name
-        save_model(self.module, str(checkpoint_path), self.model_config)
-        if self.args.use_ema:
+        
+        # Save main checkpoint WITHOUT EMA (only model, optimizer, lr_scheduler, iteration)
+        save_model(
+            self.module, 
+            str(checkpoint_path), 
+            self.model_config,
+            optimizer=self.optimizer,
+            lr_scheduler=self.lr_scheduler,
+            iteration=self.iteration,
+            ema_state_dict=None  # Don't include EMA in main checkpoint
+        )
+        
+        # Save EMA checkpoint with full training state (for resuming)
+        if self.args.use_ema and self.ema is not None:
             ema_state_dict = self.ema.state_dict()
             ema_ckpt_name = ckpt_name.replace('.pt', '_ema.pt')
             ema_checkpoint_path = self.args.save_dir / ema_ckpt_name
-            save_ema(ema_state_dict, str(ema_checkpoint_path))
+            # Save EMA checkpoint with all training state for resuming
+            save_ema_full_checkpoint(
+                model=self.module,
+                ema_state_dict=ema_state_dict,
+                optimizer=self.optimizer,
+                lr_scheduler=self.lr_scheduler,
+                iteration=self.iteration,
+                checkpoint_path=str(ema_checkpoint_path)
+            )
 
     def _make_sample_grid(self, samples: torch.Tensor, n_row: int = 4, n_col: int = 4) -> torch.Tensor:
         B, C, H, W = samples.shape
@@ -281,13 +301,16 @@ class BaseTrainer:
             self.sg_ratio_scheduler.initialize()
         
         self.train_losses = [] # Store training losses as class attribute
-        self.iteration = 0
+        # Initialize iteration if not already set (e.g., from resume)
+        if not hasattr(self, 'iteration') or self.iteration is None:
+            self.iteration = 0
+        start_iteration = self.iteration + 1 if self.iteration > 0 else 1
         self.best_fid_per_nfe = {nfe: float('inf') for nfe in self.args.fid_nfe_list}
         
-        if not self.args.skip_initial_evaluation:
+        if not self.args.skip_initial_evaluation and start_iteration == 1:
             self._evaluate()
 
-        pbar = tqdm(range(1, self.args.num_iterations + 1), desc="Training", disable=not is_main())
+        pbar = tqdm(range(start_iteration, self.args.num_iterations + 1), desc="Training", disable=not is_main())
         for iteration in pbar:
             self.iteration = iteration # Store current iteration as class attribute
             self.model.iteration = iteration
