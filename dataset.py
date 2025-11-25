@@ -19,9 +19,10 @@ from multiprocessing import Pool
 from pathlib import Path
 from PIL import Image
 import torch
+import torch.distributed as dist
 import torchvision.transforms as transforms
 from tqdm import tqdm
-from src.utils import tensor_to_pil_image
+from src.utils import tensor_to_pil_image, print, is_main
 
 # Note: kagglehub is required for downloading the dataset
 # Install with: pip install kagglehub
@@ -171,8 +172,7 @@ class CelebAHQ256Dataset(torch.utils.data.Dataset):
         return len(self.image_paths)
 
 
-class CelebA128Dataset(torch.utils.data.Dataset):
-    """Dataset for CelebA 128x128 images. Uses same logic as CelebAHQ256Dataset."""
+class CelebAHQ128Dataset(torch.utils.data.Dataset):
     def __init__(self, root, split, transform=None, val_split=0.1, seed=42):
         super().__init__()
         self.root = root
@@ -202,7 +202,7 @@ class CelebA128Dataset(torch.utils.data.Dataset):
         else:  # val
             self.image_paths = all_images[split_idx:]
         
-        print(f"CelebA-128 {split} set: {len(self.image_paths)} images")
+        print(f"CelebA-HQ-128 {split} set: {len(self.image_paths)} images")
 
     def __getitem__(self, idx):
         # Try to load the image, with fallback to next valid image if corrupted
@@ -224,6 +224,8 @@ class CelebA128Dataset(torch.utils.data.Dataset):
     
     def __len__(self):
         return len(self.image_paths)
+
+
 
 
 class CelebA64Dataset(torch.utils.data.Dataset):
@@ -342,6 +344,12 @@ class CelebAHQ256DataModule(object):
     
     def _download_dataset(self, dir_path):
         """Download CelebA-HQ-256 dataset if not found."""
+        # Only download on main process (rank 0) in DDP mode
+        if dist.is_initialized() and not is_main():
+            # Wait for main process to finish downloading
+            dist.barrier()
+            return
+        
         os.environ["KAGGLEHUB_CACHE"] = "./data"
         
         if not KAGGLEHUB_AVAILABLE:
@@ -407,6 +415,10 @@ class CelebAHQ256DataModule(object):
                 "The dataset should contain image files (.jpg, .jpeg, or .png) in the root directory or subdirectories.\n"
                 "You can find the dataset on Kaggle or other sources."
             )
+        
+        # Synchronize all processes after download completes
+        if dist.is_initialized():
+            dist.barrier()
     
     def _find_image_directory(self, root_path):
         """Find the directory containing image files, handling nested structures."""
@@ -446,6 +458,146 @@ class CelebAHQ256DataModule(object):
         return torch.utils.data.DataLoader(self.val_ds, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, drop_last=False)
 
 
+class CelebAHQ128DataModule(object):
+    def __init__(self, root="./data/datasets/celebahq128", batch_size=32, num_workers=4, transform=None, val_split=0.1, seed=42):
+        self.root = root
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.transform = transform
+        self.image_resolution = 128  # CelebA-HQ-128 is 128x128
+        self.val_split = val_split
+        self.seed = seed
+
+        if not os.path.exists(self.root) or not self._has_images(self.root):
+            self._download_dataset(dir_path=self.root)
+        self._set_dataset()
+    
+    def _has_images(self, dir_path):
+        """Check if directory contains image files."""
+        if not os.path.exists(dir_path):
+            return False
+        image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG']
+        for ext in image_extensions:
+            if glob.glob(os.path.join(dir_path, ext)) or glob.glob(os.path.join(dir_path, '**', ext), recursive=True):
+                return True
+        return False
+    
+    def _download_dataset(self, dir_path):
+        """Download CelebA-HQ-128 dataset if not found."""
+        # Only download on main process (rank 0) in DDP mode
+        if dist.is_initialized() and not is_main():
+            # Wait for main process to finish downloading
+            dist.barrier()
+            return
+        
+        os.environ["KAGGLEHUB_CACHE"] = "./data"
+        
+        if not KAGGLEHUB_AVAILABLE:
+            raise ValueError(
+                f"CelebA-HQ-128 dataset not found at {dir_path} and kagglehub is not available.\n"
+                "Please install kagglehub with: pip install kagglehub\n"
+                "Or manually download and extract the dataset to the specified path."
+            )
+        
+        # Try common Kaggle datasets for CelebA-HQ-128
+        # Common dataset identifiers to try
+        kaggle_datasets = [
+            "badasstechie/celebahq-resized-256x256",  # May contain 128x128 versions
+            "jessicali9530/celeba-dataset",
+            "lamsimon/celebahq",
+        ]
+        
+        print(f"CelebA-HQ-128 dataset not found at {dir_path}. Attempting to download...")
+        
+        # Create parent directory if it doesn't exist
+        parent_dir = os.path.dirname(dir_path)
+        if parent_dir:
+            os.makedirs(parent_dir, exist_ok=True)
+        
+        downloaded = False
+        for dataset_id in kaggle_datasets:
+            try:
+                print(f"Trying to download from Kaggle dataset: {dataset_id}...")
+                dataset_path = kagglehub.dataset_download(dataset_id)
+                
+                # Find the directory containing images (might be nested)
+                image_dir = self._find_image_directory(dataset_path)
+                
+                if image_dir:
+                    # Copy or move images to target directory
+                    if image_dir != dir_path:
+                        if os.path.exists(dir_path):
+                            # If target exists but has no images, remove it
+                            if not self._has_images(dir_path):
+                                shutil.rmtree(dir_path)
+                        
+                        if not os.path.exists(dir_path):
+                            # Copy the image directory to target location
+                            shutil.copytree(image_dir, dir_path)
+                            print(f"✓ Successfully downloaded CelebA-HQ-128 dataset to {dir_path}")
+                        else:
+                            print(f"✓ Dataset already exists at {dir_path}")
+                    else:
+                        print(f"✓ Dataset found at {dir_path}")
+                    
+                    downloaded = True
+                    break
+            except Exception as e:
+                print(f"Failed to download from {dataset_id}: {e}")
+                continue
+        
+        if not downloaded:
+            # If automatic download failed, provide helpful error message
+            raise ValueError(
+                f"CelebA-HQ-128 dataset not found at {dir_path} and automatic download failed.\n"
+                "Please manually download the CelebA-HQ-128 dataset and extract it to:\n"
+                f"  {dir_path}\n"
+                "The dataset should contain image files (.jpg, .jpeg, or .png) in the root directory or subdirectories.\n"
+                "You can find the dataset on Kaggle or other sources."
+            )
+        
+        # Synchronize all processes after download completes
+        if dist.is_initialized():
+            dist.barrier()
+    
+    def _find_image_directory(self, root_path):
+        """Find the directory containing image files, handling nested structures."""
+        if not os.path.exists(root_path):
+            return None
+        
+        # Check if root directory has images
+        if self._has_images(root_path):
+            return root_path
+        
+        # Search in subdirectories (limit depth to avoid infinite loops)
+        image_extensions = ['*.jpg', '*.jpeg', '*.png', '*.JPG', '*.JPEG', '*.PNG']
+        for root, dirs, files in os.walk(root_path):
+            # Check current directory
+            for ext in image_extensions:
+                if glob.glob(os.path.join(root, ext)):
+                    return root
+        
+        return None
+
+    def _set_dataset(self):
+        if self.transform is None:
+            self.transform = transforms.Compose(
+                [
+                    transforms.Resize((self.image_resolution, self.image_resolution)),
+                    transforms.ToTensor(),
+                    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                ]
+            )
+        self.train_ds = CelebAHQ128Dataset(self.root, "train", self.transform, val_split=self.val_split, seed=self.seed)
+        self.val_ds = CelebAHQ128Dataset(self.root, "val", self.transform, val_split=self.val_split, seed=self.seed)
+
+    def train_dataloader(self):
+        return torch.utils.data.DataLoader(self.train_ds, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=True, drop_last=True)
+
+    def val_dataloader(self):
+        return torch.utils.data.DataLoader(self.val_ds, batch_size=self.batch_size, num_workers=self.num_workers, shuffle=False, drop_last=False)
+
+
 class CelebA128DataModule(object):
     def __init__(self, root="./data/datasets/celeba128", batch_size=32, num_workers=4, transform=None, val_split=0.1, seed=42):
         self.root = root
@@ -470,8 +622,130 @@ class CelebA128DataModule(object):
                 return True
         return False
     
+    def _extract_images_from_tfrec(self, tfrec_files, output_dir):
+        """Extract images from TFRecord files."""
+        try:
+            import tensorflow as tf
+        except ImportError:
+            raise ImportError(
+                "TensorFlow is required to extract images from TFRecord files.\n"
+                "Please install it with: pip install tensorflow"
+            )
+        
+        print(f"Extracting images from {len(tfrec_files)} TFRecord file(s)...")
+        image_count = 0
+        
+        # Try different TFRecord feature descriptions (different datasets use different formats)
+        feature_descriptions = [
+            # Format 1: image, image_name
+            {
+                'image': tf.io.FixedLenFeature([], tf.string),
+                'image_name': tf.io.FixedLenFeature([], tf.string),
+            },
+            # Format 2: image/encoded, image/filename
+            {
+                'image/encoded': tf.io.FixedLenFeature([], tf.string),
+                'image/filename': tf.io.FixedLenFeature([], tf.string),
+            },
+            # Format 3: image_raw, filename
+            {
+                'image_raw': tf.io.FixedLenFeature([], tf.string),
+                'filename': tf.io.FixedLenFeature([], tf.string),
+            },
+        ]
+        
+        # Try to determine the correct format by reading first record
+        feature_description = None
+        image_key = None
+        name_key = None
+        
+        for desc in feature_descriptions:
+            try:
+                raw_dataset = tf.data.TFRecordDataset(tfrec_files[0])
+                example = next(iter(raw_dataset))
+                parsed = tf.io.parse_single_example(example, desc)
+                # Check if we can access image data
+                if 'image' in parsed:
+                    image_key = 'image'
+                    name_key = 'image_name'
+                elif 'image/encoded' in parsed:
+                    image_key = 'image/encoded'
+                    name_key = 'image/filename'
+                elif 'image_raw' in parsed:
+                    image_key = 'image_raw'
+                    name_key = 'filename'
+                else:
+                    continue
+                feature_description = desc
+                break
+            except:
+                continue
+        
+        if feature_description is None:
+            # Default to first format
+            feature_description = feature_descriptions[0]
+            image_key = 'image'
+            name_key = 'image_name'
+        
+        def _parse_tfrecord(example_proto):
+            parsed = tf.io.parse_single_example(example_proto, feature_description)
+            return parsed[image_key], parsed.get(name_key, tf.constant(''))
+        
+        for tfrec_file in tqdm(tfrec_files, desc="Processing TFRecord files"):
+            try:
+                raw_dataset = tf.data.TFRecordDataset(tfrec_file)
+                parsed_dataset = raw_dataset.map(_parse_tfrecord)
+                
+                for record in parsed_dataset:
+                    image_bytes = record[0].numpy()
+                    image_name_bytes = record[1].numpy()
+                    
+                    # Get image name
+                    if len(image_name_bytes) > 0:
+                        image_name = image_name_bytes.decode('utf-8')
+                    else:
+                        # Generate name if not available
+                        image_name = f"image_{image_count:06d}.jpg"
+                    
+                    # Save image
+                    # Remove any path separators from image_name for safety
+                    image_name = os.path.basename(image_name)
+                    # Ensure it has an extension
+                    if not any(image_name.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png']):
+                        image_name += '.jpg'
+                    
+                    output_path = os.path.join(output_dir, image_name)
+                    
+                    # Skip if already exists
+                    if os.path.exists(output_path):
+                        continue
+                    
+                    # Write image bytes to file
+                    with open(output_path, 'wb') as f:
+                        f.write(image_bytes)
+                    
+                    image_count += 1
+                    
+                    # Print progress every 1000 images
+                    if image_count % 1000 == 0:
+                        print(f"  Extracted {image_count} images...")
+                        
+            except Exception as e:
+                print(f"  Warning: Failed to process {tfrec_file}: {e}")
+                import traceback
+                traceback.print_exc()
+                continue
+        
+        print(f"  ✓ Extracted {image_count} images total")
+    
     def _download_dataset(self, dir_path):
         """Download CelebA-128 dataset if not found."""
+        # Only download on main process (rank 0) in DDP mode
+        if dist.is_initialized() and not is_main():
+            # Wait for main process to finish downloading
+            dist.barrier()
+            return
+        
         os.environ["KAGGLEHUB_CACHE"] = "./data"
         
         if not KAGGLEHUB_AVAILABLE:
@@ -495,10 +769,19 @@ class CelebA128DataModule(object):
             print(f"Downloading from Kaggle dataset: {kaggle_dataset_id}...")
             dataset_path = kagglehub.dataset_download(kaggle_dataset_id)
             
-            # Check for zip files in the downloaded directory
-            zip_files = glob.glob(os.path.join(dataset_path, "*.zip"))
+            # Check for TFRecord files first (CelebA-128 dataset uses TFRecord format)
+            tfrec_files = glob.glob(os.path.join(dataset_path, "**", "*.tfrec"), recursive=True)
+            if not tfrec_files:
+                tfrec_files = glob.glob(os.path.join(dataset_path, "*.tfrec"))
             
-            if zip_files:
+            if tfrec_files:
+                print(f"Found {len(tfrec_files)} TFRecord file(s). Extracting images...")
+                os.makedirs(dir_path, exist_ok=True)
+                self._extract_images_from_tfrec(tfrec_files, dir_path)
+                print(f"✓ Successfully extracted images from TFRecord files to {dir_path}")
+            # Check for zip files in the downloaded directory
+            elif glob.glob(os.path.join(dataset_path, "*.zip")):
+                zip_files = glob.glob(os.path.join(dataset_path, "*.zip"))
                 print(f"Found {len(zip_files)} zip file(s). Extracting...")
                 # Extract all zip files to the target directory
                 os.makedirs(dir_path, exist_ok=True)
@@ -551,6 +834,10 @@ class CelebA128DataModule(object):
                 f"  unzip {dir_path}/*.zip -d {dir_path}\n"
                 "Or extract the dataset to the specified path manually."
             )
+        
+        # Synchronize all processes after download completes
+        if dist.is_initialized():
+            dist.barrier()
     
     def _find_image_directory(self, root_path):
         """Find the directory containing image files, handling nested structures."""
@@ -616,6 +903,12 @@ class CelebA64DataModule(object):
     
     def _download_dataset(self, dir_path):
         """Download CelebA-64 dataset if not found."""
+        # Only download on main process (rank 0) in DDP mode
+        if dist.is_initialized() and not is_main():
+            # Wait for main process to finish downloading
+            dist.barrier()
+            return
+        
         os.environ["KAGGLEHUB_CACHE"] = "./data"
         
         if not KAGGLEHUB_AVAILABLE:
@@ -695,6 +988,10 @@ class CelebA64DataModule(object):
                 f"  unzip {dir_path}/*.zip -d {dir_path}\n"
                 "Or extract the dataset to the specified path manually."
             )
+        
+        # Synchronize all processes after download completes
+        if dist.is_initialized():
+            dist.barrier()
     
     def _find_image_directory(self, root_path):
         """Find the directory containing image files, handling nested structures."""
@@ -756,6 +1053,11 @@ def create_data_module(dataset_name, root=None, batch_size=32, num_workers=4, tr
             root = "./data/datasets/celebahq256"
         return CelebAHQ256DataModule(root=root, batch_size=batch_size, num_workers=num_workers, transform=transform, **kwargs)
     
+    elif dataset_name == 'celebahq128' or dataset_name == 'celebahq-128':
+        if root is None:
+            root = "./data/datasets/celebahq128"
+        return CelebAHQ128DataModule(root=root, batch_size=batch_size, num_workers=num_workers, transform=transform, **kwargs)
+    
     elif dataset_name == 'celeba128' or dataset_name == 'celeba-128':
         if root is None:
             root = "./data/datasets/celeba128"
@@ -767,7 +1069,7 @@ def create_data_module(dataset_name, root=None, batch_size=32, num_workers=4, tr
         return CelebA64DataModule(root=root, batch_size=batch_size, num_workers=num_workers, transform=transform, **kwargs)
     
     else:
-        raise ValueError(f"Unknown dataset: {dataset_name}. Supported datasets: 'celebahq256', 'celeba128', 'celeba64'")
+        raise ValueError(f"Unknown dataset: {dataset_name}. Supported datasets: 'celebahq256', 'celebahq128', 'celeba128', 'celeba64'")
 
 
 if __name__ == "__main__":
@@ -777,6 +1079,14 @@ if __name__ == "__main__":
         celebahq_module = create_data_module("celebahq256")
         print(f"  # training images: {len(celebahq_module.train_ds)}")
         print(f"  # validation images: {len(celebahq_module.val_ds)}")
+    except Exception as e:
+        print(f"  Error: {e}")
+    
+    print("\nTesting CelebA-HQ-128 dataset...")
+    try:
+        celebahq128_module = create_data_module("celebahq128")
+        print(f"  # training images: {len(celebahq128_module.train_ds)}")
+        print(f"  # validation images: {len(celebahq128_module.val_ds)}")
     except Exception as e:
         print(f"  Error: {e}")
     

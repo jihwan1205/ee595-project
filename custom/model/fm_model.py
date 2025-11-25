@@ -82,7 +82,7 @@ class FlowMatchingModel(BaseGenerativeModel):
         return pred_velocity
     
     @torch.no_grad()
-    def sample(self, shape, num_inference_timesteps=20, return_traj=False, verbose=False, **kwargs):
+    def sample(self, shape, num_inference_timesteps=20, return_traj=False, verbose=False, initial_noise=None, **kwargs):
         """
         Generate samples using Flow Matching.
         
@@ -94,6 +94,7 @@ class FlowMatchingModel(BaseGenerativeModel):
             num_inference_timesteps: Number of integration steps
             return_traj: Whether to return the full trajectory
             verbose: Whether to show progress
+            initial_noise: Optional initial noise tensor. If None, generates random noise.
             **kwargs: Additional arguments
         
         Returns:
@@ -101,8 +102,11 @@ class FlowMatchingModel(BaseGenerativeModel):
         """
         device = self.device
         
-        # Start from pure noise at t=0
-        x = torch.randn(shape, device=device)
+        # Start from pure noise at t=0, or use provided initial noise
+        if initial_noise is not None:
+            x = initial_noise.to(device)
+        else:
+            x = torch.randn(shape, device=device)
         traj = [x.clone()] if return_traj else None
 
         # Create timesteps from 0 (noise) to 1 (data)

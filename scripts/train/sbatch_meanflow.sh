@@ -2,7 +2,7 @@
 #SBATCH --job-name=meanflow_train
 #SBATCH --output=logs/train_%j.out
 #SBATCH --error=logs/train_%j.err
-#SBATCH --gres=gpu:a6000:4
+#SBATCH --gres=gpu:a6000:8
 #SBATCH -w node5
 
 # MeanFlow Training Script
@@ -26,7 +26,7 @@ BATCH_SIZE=32
 MODEL_TYPE="MeanFlow"
 WANDB_PROJECT="image_generation"
 WANDB_ENTITY="few-step-video-generation"
-WANDB_EXP_NAME="meanflow_${TIMESTAMP}"
+WANDB_EXP_NAME="128x128_meanflow_${TIMESTAMP}"
 SAVE_DIR="runs/${WANDB_EXP_NAME}"
 LR=1e-4
 NUM_TRAIN_TIMESTEPS=1000
@@ -54,6 +54,7 @@ echo ""
 # Build training command
 cmd="torchrun --standalone --nproc_per_node=gpu train.py \
     --use_ddp \
+    --dataset celebahq128 \
     --model_type $MODEL_TYPE \
     --num_iterations $NUM_ITERATIONS \
     --batch_size $BATCH_SIZE \

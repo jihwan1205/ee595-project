@@ -48,21 +48,17 @@ def generate_reflow_pairs(model, num_pairs, batch_size, num_inference_steps, dev
             image_resolution = 64  # Change this based on your dataset
             shape = (current_batch_size, 3, image_resolution, image_resolution)
             
-            # Sample from model to get x1 (generated images)
+            # Generate x0 (noise) first - this is the actual noise that will be used to generate x1
+            # This is critical for reflow: x0 must be the actual noise used, not random noise
+            x0 = torch.randn(shape, device=device)
+            
+            # Sample from model using x0 to get x1 (generated images)
             # Ensure sampling happens on the correct device
             if torch.cuda.is_available() and batch_idx == 0:
                 torch.cuda.reset_peak_memory_stats()
                 mem_before = torch.cuda.memory_allocated() / 1024**2
             
-            x1 = model.sample(shape, num_inference_timesteps=num_inference_steps, verbose=False)
-            
-            # # Verify x1 is on the correct device
-            # if x1.device != device:
-            #     print(f"Warning: x1 is on {x1.device}, moving to {device}")
-            #     x1 = x1.to(device)
-            
-            # x0 is the noise (prior distribution) - create on same device as x1
-            x0 = torch.randn_like(x1)
+            x1 = model.sample(shape, num_inference_timesteps=num_inference_steps, verbose=False, initial_noise=x0)
             
             # # Debug info for first batch
             # if torch.cuda.is_available() and batch_idx == 0:

@@ -153,6 +153,8 @@ def main(args):
     if args.data_root is None:
         if args.dataset.lower() in ['celebahq256', 'celebahq', 'celebahq-256']:
             args.data_root = "./data/datasets/celebahq256"
+        elif args.dataset.lower() in ['celebahq128', 'celebahq-128']:
+            args.data_root = "./data/datasets/celebahq128"
         elif args.dataset.lower() in ['celeba128', 'celeba-128']:
             args.data_root = "./data/datasets/celeba128"
         elif args.dataset.lower() in ['celeba64', 'celeba-64']:
@@ -163,6 +165,8 @@ def main(args):
     if args.val_reference_dir is None:
         if args.dataset.lower() in ['celebahq256', 'celebahq', 'celebahq-256']:
             args.val_reference_dir = "./data/celebahq256_256x256/val"
+        elif args.dataset.lower() in ['celebahq128', 'celebahq-128']:
+            args.val_reference_dir = "./data/celebahq128_128x128/val"
         elif args.dataset.lower() in ['celeba128', 'celeba-128']:
             args.val_reference_dir = "./data/celeba128_128x128/val"
         elif args.dataset.lower() in ['celeba64', 'celeba-64']:
@@ -302,24 +306,85 @@ def main(args):
         print("Not using Stop-Gradient Ratio Scheduler")
     
     
-    # Load checkpoint if resuming (expects EMA checkpoint with full training state)
+    # Load checkpoint if resuming
     resume_iteration = None
+    ckpt = None
     
-    if args.resume_ema_ckpt:
-        print(f"Resuming training from EMA checkpoint: {args.resume_ema_ckpt}")
-        ckpt = torch.load(args.resume_ema_ckpt, map_location='cpu')
+    # Determine which checkpoint to load
+    # Priority: 1) explicitly specified checkpoint, 2) auto-detect EMA checkpoint if EMA is enabled
+    ckpt_path = None
+    is_ema_ckpt = False
+    
+    if args.resume_ckpt:
+        # Explicitly specified normal checkpoint
+        ckpt_path = args.resume_ckpt
+        is_ema_ckpt = False
+        print(f"Resuming training from checkpoint: {ckpt_path}")
+    elif args.resume_ema_ckpt:
+        # Explicitly specified EMA checkpoint
+        ckpt_path = args.resume_ema_ckpt
+        is_ema_ckpt = True
+        print(f"Resuming training from EMA checkpoint: {ckpt_path}")
+    
+    if ckpt_path:
+        print(f"Loading checkpoint from: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location='cpu')
+        
+        # Verify checkpoint type matches expectation
+        has_ema_in_ckpt = 'ema' in ckpt
+        if is_ema_ckpt and not has_ema_in_ckpt:
+            print(f"  ⚠ Warning: Expected EMA checkpoint but no EMA state found. Proceeding with normal checkpoint.")
+            is_ema_ckpt = False
+        elif not is_ema_ckpt and has_ema_in_ckpt:
+            print(f"  ℹ Info: Checkpoint contains EMA state (will be loaded if EMA is enabled).")
         
         # Load model state
         if 'state_dict' in ckpt:
-            model.load_state_dict(ckpt['state_dict'])
+            state_dict = ckpt['state_dict']
+            
+            # Filter out unexpected keys (e.g., scheduler.timesteps)
+            model_state_dict = model.state_dict()
+            filtered_state_dict = {}
+            unexpected_keys = []
+            missing_keys = []
+            
+            for key, value in state_dict.items():
+                if key in model_state_dict:
+                    # Check if shapes match
+                    if model_state_dict[key].shape == value.shape:
+                        filtered_state_dict[key] = value
+                    else:
+                        print(f"  ⚠ Warning: Shape mismatch for key '{key}': checkpoint {value.shape} vs model {model_state_dict[key].shape}. Skipping.")
+                        missing_keys.append(key)
+                else:
+                    unexpected_keys.append(key)
+            
+            # Find keys in model but not in checkpoint
+            for key in model_state_dict.keys():
+                if key not in filtered_state_dict:
+                    missing_keys.append(key)
+            
+            # Load with strict=False to allow missing keys
+            model.load_state_dict(filtered_state_dict, strict=False)
+            
+            if unexpected_keys:
+                print(f"  ⚠ Warning: Unexpected keys in checkpoint (ignored): {unexpected_keys}")
+            if missing_keys:
+                print(f"  ⚠ Warning: Missing keys in checkpoint (using random initialization): {missing_keys}")
             print("  ✓ Model state loaded")
         else:
             raise ValueError("Checkpoint must contain 'state_dict' for model")
         
         # Load optimizer state if available
+        # Note: Optimizer state tensors will be moved to correct device after model is moved in BaseTrainer
         if 'optimizer' in ckpt:
-            optimizer.load_state_dict(ckpt['optimizer'])
-            print("  ✓ Optimizer state loaded")
+            try:
+                optimizer.load_state_dict(ckpt['optimizer'])
+                print("  ✓ Optimizer state loaded (will be moved to device after model initialization)")
+            except Exception as e:
+                print(f"  ⚠ Warning: Could not load optimizer state: {type(e).__name__}: {e}")
+                print(f"    This is expected when resuming from a checkpoint with different model architecture.")
+                print(f"    Optimizer state will be reset (training will continue with fresh optimizer state).")
         
         # Load lr_scheduler state if available
         if 'lr_scheduler' in ckpt and lr_scheduler is not None:
@@ -329,22 +394,47 @@ def main(args):
             except Exception as e:
                 print(f"  ⚠ Warning: Could not load LR scheduler state: {e}")
         
-        # Load EMA state (required for EMA checkpoints)
+        # Load EMA state if available
         if 'ema' in ckpt:
             if ema is None:
-                print("Warning: EMA checkpoint specified but EMA is not enabled. Creating EMA with default decay.")
-                ema = EMA(model, decay=args.ema_decay, device=dist.get_rank() if args.use_ddp else device)
-            ema.load_state_dict(ckpt['ema'])
-            print("  ✓ EMA state loaded")
+                if is_ema_ckpt:
+                    # EMA checkpoint was specified but EMA is not enabled - create it to load the state
+                    print("  ⚠ Warning: EMA checkpoint specified but EMA is not enabled.")
+                    print(f"    Creating EMA with decay={args.ema_decay} to load the state.")
+                    ema = EMA(model, decay=args.ema_decay, device=dist.get_rank() if args.use_ddp else device)
+                else:
+                    # Normal checkpoint contains EMA state but EMA is not enabled - skip it
+                    print("  ℹ Info: Checkpoint contains EMA state but EMA is not enabled. Skipping EMA state.")
+            if ema is not None:
+                try:
+                    ema.load_state_dict(ckpt['ema'])
+                    print("  ✓ EMA state loaded")
+                except Exception as e:
+                    print(f"  ⚠ Warning: Could not load EMA state: {type(e).__name__}: {e}")
+                    print(f"    EMA will be initialized from current model state.")
         else:
-            raise ValueError("EMA checkpoint must contain 'ema' state dict")
+            # No EMA state in checkpoint
+            if ema is not None:
+                # EMA is enabled but checkpoint doesn't have EMA state
+                if is_ema_ckpt:
+                    print("  ⚠ Warning: EMA checkpoint specified but contains no EMA state.")
+                else:
+                    print("  ⚠ Warning: EMA is enabled but checkpoint does not contain EMA state.")
+                print("    EMA will be initialized from current model state.")
+            elif not is_ema_ckpt:
+                # Normal checkpoint without EMA - this is expected
+                print("  ℹ Info: No EMA state in checkpoint (normal checkpoint, EMA not required).")
         
         # Get iteration number if available
         if 'iteration' in ckpt:
             resume_iteration = ckpt['iteration']
             print(f"  ✓ Resuming from iteration {resume_iteration}")
+        else:
+            print("  ⚠ Warning: Checkpoint does not contain iteration number. Starting from iteration 0.")
         
-        print("EMA checkpoint loaded successfully.")
+        # Summary
+        ckpt_type = "EMA checkpoint" if is_ema_ckpt else "checkpoint"
+        print(f"  ✓ {ckpt_type} loaded successfully.")
     
     
     trainer = BaseTrainer(
@@ -359,6 +449,23 @@ def main(args):
         model_config=model_config,
         train_sampler=train_sampler,
     )
+    
+    # Move optimizer state tensors to correct device after model is moved to device
+    # (needed when resuming from checkpoint loaded to CPU)
+    if ckpt_path and ckpt is not None and 'optimizer' in ckpt:
+        try:
+            # Get device from model parameters (they're now on the correct device)
+            if len(optimizer.param_groups) > 0 and len(optimizer.param_groups[0]['params']) > 0:
+                param_device = next(iter(optimizer.param_groups[0]['params'])).device
+                for param_group in optimizer.param_groups:
+                    for param in param_group['params']:
+                        if param in optimizer.state:
+                            state = optimizer.state[param]
+                            for key, value in state.items():
+                                if isinstance(value, torch.Tensor) and value.device != param_device:
+                                    state[key] = value.to(param_device)
+        except Exception as e:
+            print(f"  ⚠ Warning: Could not move optimizer state to device: {e}")
     
     # Set resume iteration if available
     if resume_iteration is not None:
@@ -386,14 +493,15 @@ def parse_args():
     parser.add_argument("--sample_interval", type=int, default=2000, help="Interval for generating samples during training")
     parser.add_argument("--sample_nfe_list", type=int, nargs='+', default=[1, 2, 4], help="Number of steps for sampling during training")
     parser.add_argument("--sample_batch_size", type=int, default=16, help="Batch size for sampling during training")
-    parser.add_argument("--resume_ema_ckpt", type=str, default=None, help="Path to EMA checkpoint to resume training from (must contain full training state: model, optimizer, lr_scheduler, iteration, EMA)")
+    parser.add_argument("--resume_ckpt", type=str, default=None, help="Path to normal checkpoint to resume training from (contains: model, optimizer, lr_scheduler, iteration, no EMA)")
+    parser.add_argument("--resume_ema_ckpt", type=str, default=None, help="Path to EMA checkpoint to resume training from (contains: model, optimizer, lr_scheduler, iteration, EMA). Use this when resuming from a checkpoint saved with EMA enabled. If both --resume_ckpt and --resume_ema_ckpt are specified, --resume_ckpt takes precedence.")
     
     # Validation arguments
     parser.add_argument("--val_interval", type=int, default=1000, help="Interval for validation")
     parser.add_argument("--val_max_batches", type=int, default=100, help="Max batches for validation (to speed up)")
     parser.add_argument('--skip_initial_evaluation', '-sie', action='store_true', help="Skip initial evaluation before training")
     parser.add_argument("--eval_fid", action='store_true', help="Evaluate FID score during validation")
-    parser.add_argument("--dataset", type=str, default="celeba64", choices=['celebahq256', 'celebahq', 'celebahq-256', 'celeba128', 'celeba-128', 'celeba64', 'celeba-64'],
+    parser.add_argument("--dataset", type=str, default="celeba64", choices=['celebahq256', 'celebahq', 'celebahq-256', 'celebahq128', 'celebahq-128', 'celeba128', 'celeba-128', 'celeba64', 'celeba-64'],
                        help="Dataset to use for training")
     parser.add_argument("--val_reference_dir", type=str, default=None, help="Directory to save/load reference images for FID evaluation. If not exists, will be created and populated with validation images. Defaults to dataset-specific path.")
     parser.add_argument("--fid_nfe_list", type=int, nargs='+', default=[1, 2, 4], help="Number of steps for FID evaluation during validation")

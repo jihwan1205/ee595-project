@@ -90,9 +90,17 @@ class BaseTrainer:
         wandb.log(log_dict, step=self.iteration)
 
     def _save_model(self, ckpt_name: str):
-        checkpoint_path = self.args.save_dir / ckpt_name
+        """
+        Save checkpoint(s) based on EMA configuration.
         
-        # Save main checkpoint WITHOUT EMA (only model, optimizer, lr_scheduler, iteration)
+        - If EMA is disabled: Save only normal checkpoint (model, optimizer, lr_scheduler, iteration)
+        - If EMA is enabled: Save both normal checkpoint and EMA checkpoint with full training state
+        """
+        if not is_main():
+            return
+        
+        # Save normal checkpoint (without EMA state)
+        checkpoint_path = self.args.save_dir / ckpt_name
         save_model(
             self.module, 
             str(checkpoint_path), 
@@ -100,23 +108,22 @@ class BaseTrainer:
             optimizer=self.optimizer,
             lr_scheduler=self.lr_scheduler,
             iteration=self.iteration,
-            ema_state_dict=None  # Don't include EMA in main checkpoint
+            ema_state_dict=None
         )
+        print(f"  ✓ Saved checkpoint: {checkpoint_path}")
         
-        # Save EMA checkpoint with full training state (for resuming)
+        # If EMA is enabled, also save EMA checkpoint with full training state
         if self.args.use_ema and self.ema is not None:
-            ema_state_dict = self.ema.state_dict()
-            ema_ckpt_name = ckpt_name.replace('.pt', '_ema.pt')
-            ema_checkpoint_path = self.args.save_dir / ema_ckpt_name
-            # Save EMA checkpoint with all training state for resuming
+            ema_checkpoint_path = self.args.save_dir / ckpt_name.replace('.pt', '_ema.pt')
             save_ema_full_checkpoint(
                 model=self.module,
-                ema_state_dict=ema_state_dict,
+                ema_state_dict=self.ema.state_dict(),
                 optimizer=self.optimizer,
                 lr_scheduler=self.lr_scheduler,
                 iteration=self.iteration,
                 checkpoint_path=str(ema_checkpoint_path)
             )
+            print(f"  ✓ Saved EMA checkpoint: {ema_checkpoint_path}")
 
     def _make_sample_grid(self, samples: torch.Tensor, n_row: int = 4, n_col: int = 4) -> torch.Tensor:
         B, C, H, W = samples.shape
@@ -165,6 +172,10 @@ class BaseTrainer:
     
     @torch.no_grad()    
     def _evaluate_fid(self, nfe: int = 20) -> float:
+        # Clear memory before FID evaluation
+        torch.cuda.empty_cache()
+        gc.collect()
+        
         generated_images = self._sample(nfe=nfe, batch_size=self.args.fid_batch_size)
         if not hasattr(self, 'feat_model'):
             self.feat_model = fid.build_feature_extractor(mode='clean', device=self.rank, use_dataparallel=False)
@@ -172,9 +183,16 @@ class BaseTrainer:
         mu, sigma = compute_gen_image_statistics(generated_images, feat_model=self.feat_model, num_gen=self.args.fid_batch_size, batch_size=self.args.fid_batch_size, use_ddp=self.args.use_ddp, device=self.rank)
         mu2, sigma2 = compute_image_folder_statistics(folder_path=self.args.val_reference_dir, feat_model=self.feat_model, device=self.rank)
         
-        del self.feat_model
+        # Clear generated images from memory
+        del generated_images
+        torch.cuda.empty_cache()
         
         fid_score = fid.frechet_distance(mu, sigma, mu2, sigma2)
+        
+        # Clear intermediate statistics
+        del mu, sigma, mu2, sigma2
+        torch.cuda.empty_cache()
+        
         return fid_score
 
     @torch.no_grad()
@@ -220,6 +238,10 @@ class BaseTrainer:
             
             if count > 0:
                 pbar.set_postfix({"Val Loss": f"{total/count:.4f}"})
+            
+            # Clear validation batch from memory
+            del data, loss
+            torch.cuda.empty_cache()
         
         val_loss = total / max(1, count)
         if self.args.use_ddp:
@@ -228,6 +250,10 @@ class BaseTrainer:
         # Restore original parameters
         if self.ema is not None:
             self.ema.restore()
+        
+        # Clear memory after validation loss computation
+        torch.cuda.empty_cache()
+        gc.collect()
         
         return val_loss.item()
     
@@ -254,11 +280,17 @@ class BaseTrainer:
                 if fid_score < self.best_fid_per_nfe[nfe]:
                     self.best_fid_per_nfe[nfe] = fid_score
                     self._save_model(ckpt_name=f"best_nfe{nfe}.pt")
+            
+            # Clean up feat_model after all FID evaluations are done
+            if hasattr(self, 'feat_model'):
+                del self.feat_model
+                torch.cuda.empty_cache()
         
         if self.args.use_wandb and is_main():
             self._log_wandb_eval(log_dict)
         
         self.model.train()
+        torch.cuda.empty_cache()
         gc.collect()
 
     def _train_step(self, data: torch.Tensor) -> torch.Tensor:

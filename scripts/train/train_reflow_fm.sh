@@ -1,34 +1,31 @@
 #!/bin/bash
-#SBATCH --job-name=reflow
+#SBATCH --job-name=fm_reflow
 #SBATCH --output=logs/train_%j.out
 #SBATCH --error=logs/train_%j.err
 #SBATCH --gres=gpu:a6000:4
-#SBATCH -w node5
+#SBATCH -w node6
 
 
 set -euo pipefail
 
 # Create logs directory if it doesn't exist
 mkdir -p logs
-# source ~/.bashrc
-# conda activate /tmp/$USER/.conda/envs/ee595
+source ~/.bashrc
+conda activate /tmp/$USER/.conda/envs/ee595
 
 # Get current timestamp for log file
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOG_FILE="logs/train_meanflow_reflow_${TIMESTAMP}.log"
 
 # Training configuration
-NUM_ITERATIONS=100000
+NUM_ITERATIONS=1000000
 BATCH_SIZE=64
-MODEL_TYPE="MeanFlow"
+MODEL_TYPE="FlowMatching"
 WANDB_PROJECT="image_generation"
 WANDB_ENTITY="few-step-video-generation"
-# WANDB_EXP_NAME="meanflow_reflow_fm_${TIMESTAMP}"
-# REFLOW_DATASET_PATH="./data/fm_reflow"
-# RESUME_CKPT="runs/fm_20251112_212008/checkpoint_iter_170000.pt"
-WANDB_EXP_NAME="meanflow_reflow_meanflow_${TIMESTAMP}"
-REFLOW_DATASET_PATH="./data/meanflow_reflow"
-RESUME_CKPT="runs/meanflow_20251112_214732/checkpoint_iter_250000.pt"
+WANDB_EXP_NAME="fm_reflow_${TIMESTAMP}"
+REFLOW_DATASET_PATH="./data/fm_reflow"
+RESUME_CKPT="/home/jihwanshin/EE595_project/runs/fm_20251118_140918/checkpoint_iter_150000.pt"
 SAVE_DIR="runs/${WANDB_EXP_NAME}"
 LR=1e-4
 NUM_TRAIN_TIMESTEPS=1000

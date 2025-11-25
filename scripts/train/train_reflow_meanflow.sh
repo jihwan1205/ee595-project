@@ -1,35 +1,36 @@
 #!/bin/bash
-#SBATCH --job-name=fm_train
+#SBATCH --job-name=meanflow_reflow
 #SBATCH --output=logs/train_%j.out
 #SBATCH --error=logs/train_%j.err
 #SBATCH --gres=gpu:a6000:4
-#SBATCH -w node5
+#SBATCH -w node6
 
-# DDPM Training Script
-# Trains DDPM model with 100k iterations and batch size 128
-# All stdout and stderr are logged to a file
 
 set -euo pipefail
 
-# # Create logs directory if it doesn't exist
-# mkdir -p logs
-# source ~/.bashrc
-# conda activate /tmp/$USER/.conda/envs/ee595
+# Create logs directory if it doesn't exist
+mkdir -p logs
+source ~/.bashrc
+conda activate /tmp/$USER/.conda/envs/ee595
 
 # Get current timestamp for log file
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-LOG_FILE="logs/train_fm_${TIMESTAMP}.log"
+LOG_FILE="logs/train_meanflow_reflow_${TIMESTAMP}.log"
 
 # Training configuration
-NUM_ITERATIONS=1_000_000
-BATCH_SIZE=32
-MODEL_TYPE="FlowMatching"
+NUM_ITERATIONS=1000000
+BATCH_SIZE=64
+MODEL_TYPE="MeanFlow"
 WANDB_PROJECT="image_generation"
 WANDB_ENTITY="few-step-video-generation"
-WANDB_EXP_NAME="128x128_fm_${TIMESTAMP}"
+WANDB_EXP_NAME="meanflow_reflow_${TIMESTAMP}"
+REFLOW_DATASET_PATH="./data/meanflow_reflow"
+RESUME_CKPT="/home/jihwanshin/EE595_project/runs/meanflow_20251118_140918/checkpoint_iter_150000.pt"
 SAVE_DIR="runs/${WANDB_EXP_NAME}"
 LR=1e-4
 NUM_TRAIN_TIMESTEPS=1000
+
+
 
 # Additional training settings
 LOG_INTERVAL=100
@@ -39,7 +40,7 @@ SAMPLE_INTERVAL=5000
 
 export PYTHONUNBUFFERED=1
 
-echo "Starting FlowMatching Training"
+echo "Starting Reflow Training"
 echo "Timestamp: $TIMESTAMP"
 echo "Log file: $LOG_FILE"
 echo "Configuration:"
@@ -51,12 +52,11 @@ echo "  - Save Directory: $SAVE_DIR"
 echo "  - WandB Project: $WANDB_PROJECT"
 echo ""
 
-# Build training command
 cmd="torchrun --standalone --nproc_per_node=gpu train.py \
     --use_ddp \
     --model_type $MODEL_TYPE \
-    --num_iterations $NUM_ITERATIONS \
     --batch_size $BATCH_SIZE \
+    --num_iterations $NUM_ITERATIONS \
     --lr $LR \
     --device cuda \
     --num_train_timesteps $NUM_TRAIN_TIMESTEPS \
@@ -76,8 +76,13 @@ cmd="torchrun --standalone --nproc_per_node=gpu train.py \
     --beta_end 0.02 \
     --eval_fid \
     --fid_nfe_list 1 2 4 \
-    --val_max_batches 10 \
+    --use_reflow \
+    --reflow_dataset_path $REFLOW_DATASET_PATH \
+    --resume_ckpt $RESUME_CKPT \
     --fid_batch_size 512"
+    
+
+
 
 echo "Command: $cmd"
 echo ""
@@ -105,5 +110,3 @@ else
 fi
 
 exit $EXIT_CODE
-
-

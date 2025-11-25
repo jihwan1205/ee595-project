@@ -15,7 +15,7 @@ LOG_FILE="logs/train_meanflow_${TIMESTAMP}.log"
 
 # Training configuration
 NUM_ITERATIONS=1_000_000
-BATCH_SIZE=16
+BATCH_SIZE=32
 MODEL_TYPE="MeanFlow"
 WANDB_PROJECT="image_generation"
 WANDB_ENTITY="few-step-video-generation"
@@ -46,6 +46,7 @@ echo ""
 
 # Build training command
 cmd="torchrun --standalone --nproc_per_node=gpu train.py \
+    --dataset celebahq128 \
     --use_ddp \
     --model_type $MODEL_TYPE \
     --num_iterations $NUM_ITERATIONS \
@@ -58,7 +59,6 @@ cmd="torchrun --standalone --nproc_per_node=gpu train.py \
     --val_interval $VAL_INTERVAL \
     --sample_interval $SAMPLE_INTERVAL \
     --save_dir $SAVE_DIR \
-    --use_wandb \
     --wandb_project $WANDB_PROJECT \
     --wandb_entity $WANDB_ENTITY \
     --wandb_exp_name $WANDB_EXP_NAME \
@@ -69,6 +69,7 @@ cmd="torchrun --standalone --nproc_per_node=gpu train.py \
     --beta_end 0.02 \
     --eval_fid \
     --fid_nfe_list 1 2 4 \
+    --val_max_batches 100 \
     --fid_batch_size 512"
 
 echo "Command: $cmd"
